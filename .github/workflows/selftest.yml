@@ -1,0 +1,31 @@
+name: selftest
+# Checks this repository's own scripts on every push: syntax, workflow YAML, unit tests, and the image pipeline end to end on a synthetic source
+# (build, boundary checks, archive, signature) with a throw-away key. Uses no secrets and never touches the source repository.
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Static checks and unit tests
+        run: |
+          git clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/runner"
+          cd "$RUNNER_TEMP/runner"
+          git checkout -q "$GITHUB_SHA"
+          for f in bin/*.sh tests/*.sh; do bash -n "$f"; done
+          python3 -m py_compile bin/*.py tests/*.py
+          python3 -m venv "$RUNNER_TEMP/rt"
+          "$RUNNER_TEMP/rt/bin/pip" install -q --require-hashes -r bin/requirements.txt
+          "$RUNNER_TEMP/rt/bin/python" -c 'import sys, yaml; [yaml.safe_load(open(p)) for p in sys.argv[1:]]; print("workflows parse")' .github/workflows/*.yml
+          python3 -m unittest discover -s tests -v
+      - name: Image pipeline on a synthetic source
+        run: bash "$RUNNER_TEMP/runner/tests/image-e2e.sh"

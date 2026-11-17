@@ -1,6 +1,6 @@
 # Generic CI runner
 
-This repository runs the checks of one private repository on GitHub's free hosted runners for public repositories. It contains **no product code**: only the workflow plumbing in `.github/workflows/` and the helper scripts in `bin/`. The private repository and the log repository are named only in encrypted repository secrets.
+This repository runs the checks of one private repository, and builds its container images, on GitHub's free hosted runners for public repositories. It contains **no product code**: only the workflow plumbing in `.github/workflows/` and the helper scripts in `bin/`. The private repository and the log repository are named only in encrypted repository secrets.
 
 ## How it works
 
@@ -24,8 +24,35 @@ Repository secrets:
 | `SRC_TOKEN` | fine-grained token on the source repository: Contents read, Metadata read, Commit statuses read and write, Pull requests read |
 | `LOG_REPO` | `owner/name` of the private log repository |
 | `LOG_TOKEN` | optional fine-grained token on the log repository only: Contents read and write. When it is not set, `SRC_TOKEN` is used and then needs that access too |
+| `ART_REPO` | `owner/name` of the private artifact repository (`image` only) |
+| `ART_TOKEN` | fine-grained token on the artifact repository only: Contents read and write (`image` only; never reuse `LOG_TOKEN` or `SRC_TOKEN`) |
+| `IMAGE_SIGNING_KEY` | OpenSSH ed25519 private key without passphrase; its public key is pinned by the consumer (`image` only) |
+| `STAGING_PUBLIC_KEY` | the public build value substituted for `{public_key}` in the spec (`image` only) |
+
+Repository variable `IMAGE_AUTO` = `true` turns on the scheduled default-branch build of `image`.
 
 Recommended repository settings: Actions > General > "Require approval for all external contributors" for fork pull request workflows. Scheduled workflows in a public repository are paused by GitHub after 60 days without repository activity; re-enable `quality` in the Actions tab if that happens.
+
+## Image builds (`image`)
+
+`image` builds one source commit into a container image and stores it **privately**: never as a workflow artifact, a package or anything else this public repository can expose.
+
+1. **Trigger.** `workflow_dispatch` with `sha` (40 hex characters) and optional `force` (rebuild an image that is already stored; a rebuild has a new image id). A schedule every 20 minutes dispatches the head of the source default branch when it has no `ci/image` status yet; it is off unless the repository variable `IMAGE_AUTO` is `true`.
+2. **Spec.** The source repository describes the image in a JSON file at the commit (`SPEC_PATH` in the workflow; the default-branch head's copy is used when the commit predates it): image tag, platform, excluded paths, build arguments (`{public_key}` is replaced by the `STAGING_PUBLIC_KEY` secret), boundary checks, fixed manifest fields, signature namespace and header, release name and how many builds to keep. `bin/image.py` validates it and fails closed on anything unknown. The spec is data: no source code runs on the runner host.
+3. **Build.** `git archive` of the exact commit (minus the excluded paths), `docker buildx build --platform <p> --provenance=false` with the revision label, in the classic image store (switched on if the runner's daemon uses the containerd store). Build argument values reach docker through its environment, never an argument list.
+4. **Checks.** Revision label and platform of the image; then a container without network checks the runtime user, the required files, `node --check` and that no server-only name from the spec occurs in the browser files.
+5. **Archive.** `docker save | gzip -1`, its SHA-256, and a check that the archive holds exactly this image (tag and config digest). A manifest JSON records commit, image id, tag, archive digest, the spec's fixed fields and the build provenance (this run and the private log path).
+6. **Signature.** `ssh-keygen -Y sign` with the builder key (`IMAGE_SIGNING_KEY`) over `<header>\nrelease_sha: ..\nimage_id: ..\narchive_sha256: ..\n` in the spec's namespace, verified once before upload. The key exists only in this step, written to a 0600 file that is deleted before the step ends; the log shows its public fingerprint.
+7. **Store.** The archive, manifest and signature are uploaded as `<prefix><sha>.tar.gz`, `.json`, `.sig` to a prerelease of the private artifact repository (`ART_REPO`), replacing assets of the same name; older builds beyond the spec's `keep` are deleted.
+8. **Report.** Full log and result to the private log repository (`runs/<date>/<sha>/image.log`, `image.json`), commit status `ci/image` on the source commit (`stored <image id>`, `already stored`, `failed at <step>`).
+
+**Trust.** Whoever can run workflows of this repository with its secrets can sign images: today that is only the owner account (no pull request triggers, no other collaborators). A consumer that pins the builder public key accepts any image this key signed, so it should also require its own approval of the exact image id. Rotate the key by replacing the secret and the pinned public key together.
+
+Why an artifact repository and not a container registry: a package pushed from a public repository's workflow can end up linked to it and public, and a registry pull does not yield the `docker save` archive whose digest is signed. Release assets of a private repository are readable only with a token on that repository; `ART_TOKEN` can write there and nowhere else, and it is used only by `image`, whose host never runs source code (the test jobs of `quality` run source code on their host, so their tokens must be assumed readable by it).
+
+## Self-test (`selftest`)
+
+On every push to this repository: shell and Python syntax, workflow YAML, `tests/test_image.py`, and `tests/image-e2e.sh`, which runs the whole image pipeline (prepare, build, checks, archive, signature) on a synthetic source with a throw-away key and checks that a forbidden name in the browser files fails the build. No secrets, no source repository.
 
 ## Adding a job
 
