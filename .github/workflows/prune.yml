@@ -1,0 +1,27 @@
+name: prune
+# Weekly: delete stored logs older than 30 days and squash the log repository's history.
+on:
+  schedule:
+    - cron: '23 4 * * 0'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prune
+        env:
+          LOG_REPO: ${{ secrets.LOG_REPO }}
+          LOG_TOKEN: ${{ secrets.LOG_TOKEN || secrets.SRC_TOKEN }}
+          KEEP_DAYS: '30'
+        run: |
+          git clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/runner" >/dev/null 2>&1
+          git -C "$RUNNER_TEMP/runner" checkout -q "$GITHUB_SHA" >/dev/null 2>&1
+          bash "$RUNNER_TEMP/runner/bin/prune-logs.sh"
