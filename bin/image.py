@@ -223,8 +223,12 @@ def prune_plan(assets: list, prefix: str, keep: int) -> list:
 
 def archive_identity(archive: Path) -> tuple[list, str]:
     """(RepoTags, image id) of a single-image `docker save` archive, read without extracting it."""
-    with tarfile.open(archive, 'r:gz') as tar:
-        names = {m.name: m for m in tar.getmembers() if m.isfile()}
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        if any(not (m.isfile() or m.isdir()) for m in members):
+            # Consumers that validate the archive without extracting it accept regular files and directories only.
+            raise Failure("archive: contains links or special members")
+        names = {m.name: m for m in members if m.isfile()}
         if 'manifest.json' not in names:
             raise Failure('archive: no manifest.json')
         entries = json.load(tar.extractfile(names['manifest.json']))
