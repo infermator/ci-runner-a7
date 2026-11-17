@@ -1,0 +1,45 @@
+name: pulse
+# The quality poller without GitHub's cron (bin/pulse.py says why). One run polls the source every 4 minutes for about 55 minutes, then
+# dispatches the next run and ends; the concurrency group holds that successor until this run has ended, so one run polls at a time.
+# A broken chain is restarted by any quality run (job `keepalive` in quality.yml) and by the schedule below whenever GitHub fires it.
+# To stop the chain, disable this workflow in the Actions tab (the next dispatch then fails and nothing restarts it).
+# Public log policy as in quality.yml: the log shows only the poller's count lines.
+run-name: pulse
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '11,41 * * * *'
+
+permissions: {}
+
+concurrency:
+  group: pulse
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      actions: write
+    env:
+      SRC_REPO: ${{ secrets.SRC_REPO }}
+      SRC_TOKEN: ${{ secrets.SRC_TOKEN }}
+      DISPATCH_TOKEN: ${{ github.token }}
+      SELF_REPO: ${{ github.repository }}
+      SELF_REF: ${{ github.ref_name }}
+    steps:
+      - name: Poll every 4 minutes
+        run: |
+          git clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/runner" >/dev/null 2>&1
+          git -C "$RUNNER_TEMP/runner" checkout -q "$GITHUB_SHA" >/dev/null 2>&1
+          end=$((SECONDS + 55 * 60))
+          while :; do
+            python3 "$RUNNER_TEMP/runner/bin/poll.py" || true
+            [ $((SECONDS + 240)) -lt "$end" ] || break
+            sleep 240
+          done
+      - name: Pass on
+        if: always()
+        run: python3 "$RUNNER_TEMP/runner/bin/pulse.py" next
