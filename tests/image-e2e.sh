@@ -58,6 +58,7 @@ assert m['image_tag'] == f'selftest-web:rc-{sha}' and m['mode'] is True and m['p
 with tarfile.open(work / 'image.tar.gz', 'r:gz') as tar:
     entry = json.load(tar.extractfile('manifest.json'))[0]
     config = tar.extractfile(entry['Config']).read()
+    print('archive top-level members:', sorted({m.name.split('/')[0] for m in tar.getmembers()}), 'types:', sorted({m.type.decode() if isinstance(m.type, bytes) else str(m.type) for m in tar.getmembers()}))
 assert entry['RepoTags'] == [m['image_tag']], 'tag'
 assert 'sha256:' + hashlib.sha256(config).hexdigest() == m['image_id'], 'image id'
 labels = json.loads(config)['config']['Labels']
