@@ -7,8 +7,8 @@ of workflow_dispatch runs instead: each run polls for a while and then dispatche
 the job token does start a run (the documented exception to the GITHUB_TOKEN rule).
 
   pulse.py next    dispatch the next pulse run (called by a pulse run at its end)
-  pulse.py ensure  dispatch a pulse run only when none is queued, waiting or running (called by every quality run, so any
-                   test run restarts a broken chain)
+  pulse.py ensure  dispatch a pulse run only when none is queued, waiting or running (called by every quality run and by
+                   pulse-watchdog after every pulse run, so a run that ends without a successor restarts the chain)
 
   DISPATCH_TOKEN, SELF_REPO, SELF_REF
 Prints one fixed line.
@@ -16,12 +16,14 @@ Prints one fixed line.
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from poll import ApiError, api  # noqa: E402
 
 WORKFLOW = 'pulse.yml'
 ACTIVE = ('in_progress', 'queued', 'pending', 'waiting', 'requested')
+RETRY_SECONDS = (10, 30, 90)  # a transient API failure must not end the chain
 
 
 def active_runs(repo: str, token: str) -> int:
@@ -33,7 +35,14 @@ def active_runs(repo: str, token: str) -> int:
 
 
 def dispatch(repo: str, token: str, ref: str) -> None:
-    api('POST', f'/repos/{repo}/actions/workflows/{WORKFLOW}/dispatches', token, {'ref': ref})
+    for wait in (*RETRY_SECONDS, None):
+        try:
+            api('POST', f'/repos/{repo}/actions/workflows/{WORKFLOW}/dispatches', token, {'ref': ref})
+            return
+        except ApiError:
+            if wait is None:
+                raise
+            time.sleep(wait)
 
 
 def main(argv: list[str]) -> int:
