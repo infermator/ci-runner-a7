@@ -1,0 +1,116 @@
+name: image
+# Builds one commit of the source repository into a container image, checks it, signs it and stores it in a PRIVATE artifact repository as release
+# assets. The image spec (tag, build arguments, checks, manifest fields, signature labels, release name) is data in the source repository; no source
+# code runs on the runner host (the source's Dockerfile runs inside BuildKit, the checks in a container without network).
+# Public log policy as in quality.yml: one fixed line per step; full output goes to the private log repository; no artifacts are uploaded here.
+# Each step holds only its own secret. No pull_request triggers: forks never receive secrets.
+run-name: ${{ github.event_name == 'schedule' && 'image poll' || format('image {0}', inputs.sha) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to build (40 hex characters)
+        required: true
+        type: string
+      force:
+        description: Rebuild even if this commit's image is already stored (a rebuild gets a new image id)
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '3,23,43 * * * *'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.event_name == 'schedule' && 'image-poll' || format('image-{0}', inputs.sha) }}
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    # Off unless the repository variable IMAGE_AUTO is 'true'. Builds the source default-branch head when it has no `ci/image` status yet.
+    if: github.event_name == 'schedule' && vars.IMAGE_AUTO == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the default branch head
+        env:
+          SRC_REPO: ${{ secrets.SRC_REPO }}
+          SRC_TOKEN: ${{ secrets.SRC_TOKEN }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          SELF_REPO: ${{ github.repository }}
+          SELF_REF: ${{ github.ref_name }}
+        run: |
+          git clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/runner" >/dev/null 2>&1
+          git -C "$RUNNER_TEMP/runner" checkout -q "$GITHUB_SHA" >/dev/null 2>&1
+          python3 "$RUNNER_TEMP/runner/bin/image.py" poll --log "$RUNNER_TEMP/poll.log"
+
+  build:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SPEC_PATH: infra/staging/web-image-spec.json
+    steps:
+      - name: Prepare
+        env:
+          SHA_IN: ${{ inputs.sha }}
+          FORCE_IN: ${{ inputs.force }}
+          SRC_REPO: ${{ secrets.SRC_REPO }}
+          SRC_TOKEN: ${{ secrets.SRC_TOKEN }}
+        run: |
+          [[ $SHA_IN =~ ^[0-9a-f]{40}$ ]] || { echo "invalid commit id"; exit 1; }
+          export SHA=$SHA_IN
+          { echo "SHA=$SHA"; echo "RUN_DATE=$(date -u +%F)"; echo "FORCE=$([ "$FORCE_IN" = true ] && echo true || echo false)"; } >>"$GITHUB_ENV"
+          git clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/runner" >/dev/null 2>&1
+          git -C "$RUNNER_TEMP/runner" checkout -q "$GITHUB_SHA" >/dev/null 2>&1
+          python3 "$RUNNER_TEMP/runner/bin/status.py" pending ci/image running || true
+          bash "$RUNNER_TEMP/runner/bin/fetch-source.sh" "$RUNNER_TEMP/src" "$RUNNER_TEMP/image.log"
+          python3 "$RUNNER_TEMP/runner/bin/image.py" prepare --sha "$SHA" --src "$RUNNER_TEMP/src" --spec-path "$SPEC_PATH" \
+            --work "$RUNNER_TEMP/image" --log "$RUNNER_TEMP/image.log" --result "$RUNNER_TEMP/image-result.json"
+      - name: Check store
+        env:
+          ART_REPO: ${{ secrets.ART_REPO }}
+          ART_TOKEN: ${{ secrets.ART_TOKEN }}
+        run: |
+          python3 "$RUNNER_TEMP/runner/bin/image.py" check --sha "$SHA" --work "$RUNNER_TEMP/image" \
+            --log "$RUNNER_TEMP/image.log" --result "$RUNNER_TEMP/image-result.json"
+          stored=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1])).get("stored", False)).lower())' "$RUNNER_TEMP/image-result.json")
+          if [ "$stored" = true ] && [ "$FORCE" != true ]; then echo "SKIP=true" >>"$GITHUB_ENV"; fi
+      - name: Build
+        if: env.SKIP != 'true'
+        env:
+          PUBLIC_KEY: ${{ secrets.STAGING_PUBLIC_KEY }}
+        run: |
+          python3 "$RUNNER_TEMP/runner/bin/image.py" build --sha "$SHA" --src "$RUNNER_TEMP/src" --work "$RUNNER_TEMP/image" \
+            --log "$RUNNER_TEMP/image.log" --result "$RUNNER_TEMP/image-result.json" --run-date "$RUN_DATE"
+      - name: Sign
+        if: env.SKIP != 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.IMAGE_SIGNING_KEY }}
+        run: |
+          python3 "$RUNNER_TEMP/runner/bin/image.py" sign --sha "$SHA" --work "$RUNNER_TEMP/image" \
+            --log "$RUNNER_TEMP/image.log" --result "$RUNNER_TEMP/image-result.json"
+      - name: Publish
+        if: env.SKIP != 'true'
+        env:
+          ART_REPO: ${{ secrets.ART_REPO }}
+          ART_TOKEN: ${{ secrets.ART_TOKEN }}
+        run: |
+          python3 "$RUNNER_TEMP/runner/bin/image.py" publish --sha "$SHA" --work "$RUNNER_TEMP/image" \
+            --log "$RUNNER_TEMP/image.log" --result "$RUNNER_TEMP/image-result.json"
+      - name: Report
+        if: always()
+        env:
+          SRC_REPO: ${{ secrets.SRC_REPO }}
+          SRC_TOKEN: ${{ secrets.SRC_TOKEN }}
+          LOG_REPO: ${{ secrets.LOG_REPO }}
+          LOG_TOKEN: ${{ secrets.LOG_TOKEN || secrets.SRC_TOKEN }}
+        run: |
+          rm -rf "$RUNNER_TEMP/image" "$RUNNER_TEMP/src"
+          [ -d "$RUNNER_TEMP/runner" ] || exit 1
+          bash "$RUNNER_TEMP/runner/bin/report-image.sh"
