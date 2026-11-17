@@ -1,0 +1,33 @@
+name: pulse-watchdog
+# Restarts the pulse chain when a pulse run ends without a successor (its dispatch failed after the retries, the runner was lost, the run was
+# cancelled). It runs after every pulse run; a healthy run has already queued its successor, so `ensure` finds it and does nothing.
+# workflow_run runs from the default branch in this repository's own context; pulse has no pull_request trigger, so no fork run reaches it.
+run-name: pulse watchdog
+
+on:
+  workflow_run:
+    workflows: [pulse]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: pulse-watchdog
+  cancel-in-progress: false
+
+jobs:
+  ensure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Restart the chain if it stopped
+        env:
+          DISPATCH_TOKEN: ${{ github.token }}
+          SELF_REPO: ${{ github.repository }}
+          SELF_REF: ${{ github.event.repository.default_branch }}
+        run: |
+          git clone -q "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$RUNNER_TEMP/runner" >/dev/null 2>&1
+          git -C "$RUNNER_TEMP/runner" checkout -q "$GITHUB_SHA" >/dev/null 2>&1
+          python3 "$RUNNER_TEMP/runner/bin/pulse.py" ensure || true
