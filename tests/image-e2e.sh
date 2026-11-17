@@ -80,6 +80,7 @@ img prepare --sha "$leak" --src "$w/src" --spec-path spec/image-spec.json --work
 if img build --sha "$leak" --src "$w/src" --work "$w/work2" --run-date 2026-01-01; then
   echo "leak was not detected"; exit 1
 fi
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert (r["stage"], r["state"]) == ("build", "failure"), r' "$w/result.json"
-echo "leak detected"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert (r["stage"], r["state"]) == ("build", "failure") and r["reason"].startswith("docker run"), r' "$w/result.json"
+echo "leak detected by the boundary check"
+if grep -q "containerd image store active" "$w/log"; then echo "daemon was switched to the classic image store"; else echo "daemon already used the classic image store"; fi
 echo "selftest: image pipeline ok"
